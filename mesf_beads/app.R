@@ -71,57 +71,60 @@ ui <- page_sidebar(
 server <- function(input, output) {
   
   observeEvent(input$browser, browser())
+
+  # tibble of 4 rows - beads 1:4
+  # unstained value
+  table_values <- reactiveValues()
   
-#Select data ---------- 
-  selected_data <- reactive({
-    
+  values <- reactiveValues()
+  
+  # update main table values when go button is pressed
+  observe({
     filtered_data <- data |>
       filter(machine == input$machine) |>
       filter(raw_unmixed == input$type) |>
       filter(fluoro == input$fluoro)
     
     validate(need(nrow(filtered_data) > 0, "Data unavailable"))
-    filtered_data
+    
+    table_values$main_table <- filter(filtered_data, bead_no != "Unstained")
+    table_values$blank_value <- filter(filtered_data, bead_no == "Unstained")$value
+    
   }) |>
     bindEvent(input$go)
-  
-  data_filt_for_model <- reactive({
-    req(selected_data())
-    selected_data() |>
-      filter(bead_no != "Unstained")
-  })
-  
-  values <- reactiveValues()
-  
+   
+    
   observe({
-    values$max_channel_value <- max(data_filt_for_model()$value)
-    values$blank_value <- filter(selected_data(), bead_no == "Unstained")$value
+    
+    req(table_values$main_table)
+    
+    values$max_channel_value <- max(table_values$main_table$value)
     
     if (input$allow_neg) {
       values$reg_coef <- cor(x = log10(ABC), y = sign_preserved_log10_values())
     } else {
-      values$reg_coef <- cor(x = log10(ABC), y = log10(data_filt_for_model()$value))
+      values$reg_coef <- cor(x = log10(ABC), y = log10(table_values$main_table$value))
     }
   }) |>
-    bindEvent(data_filt_for_model(), input$allow_neg)
+    bindEvent(table_values$main_table, input$allow_neg)
     
   sign_preserved_log10_values <- reactive({
-    sign(data_filt_for_model()$value) * log10(1 + abs(data_filt_for_model()$value))
+    sign(table_values$main_table$value) * log10(1 + abs(table_values$main_table$value))
   })
   
     # Linear model -----
     # returns log10 values
     lin_mod <- reactive({
-      req(data_filt_for_model())
+      req(table_values$main_table)
       
       if (input$allow_neg) {
         log_abc <-  sign(ABC) * log10(1 + abs(ABC))
-        #log_chan <- sign(data_filt_for_model()$value) * log10(1 + abs(data_filt_for_model()$value))
+        #log_chan <- sign(table_values$main_table$value) * log10(1 + abs(table_values$main_table$value))
         log_chan <- sign_preserved_log10_values()
         lm(log_abc ~ log_chan)
       } else {
         log_abc <- log10(ABC)
-        log_chan <- log10(data_filt_for_model()$value)
+        log_chan <- log10(table_values$main_table$value)
         lm(log_abc ~ log_chan)
       }
     })
@@ -132,9 +135,9 @@ server <- function(input, output) {
       req(lin_mod())
       
       if (input$allow_neg) {
-        x <- sign(values$blank_value) * log10(1+abs(values$blank_value)) # sign preserved x
+        x <- sign(table_values$blank_value) * log10(1+abs(table_values$blank_value)) # sign preserved x
       } else {
-        x <- log10(values$blank_value)
+        x <- log10(table_values$blank_value)
       }
       # y = mx + c
       y <- (lin_mod()$coefficients[2] * x) + lin_mod()$coefficients[1]
@@ -147,9 +150,9 @@ server <- function(input, output) {
       req(lin_mod())
       
       if (input$allow_neg) {
-        x <- sign(values$blank_value) * log10(1+abs(values$blank_value)) # sign preserved x
+        x <- sign(table_values$blank_value) * log10(1+abs(table_values$blank_value)) # sign preserved x
       } else {
-        x <- log10(values$blank_value)
+        x <- log10(table_values$blank_value)
       }
       vals <- predict(
         lin_mod(), 
@@ -161,7 +164,7 @@ server <- function(input, output) {
     
     xy_limits <- reactive({
       req(detection_threshold())
-      x1 <- if_else(sign(values$blank_value) == 1, values$blank_value/2, values$blank_value*2)
+      x1 <- if_else(sign(table_values$blank_value) == 1, table_values$blank_value/2, table_values$blank_value*2)
       x2 <- values$max_channel_value * 1.1
       y1 <- if_else(sign(detection_threshold()) == 1, detection_threshold()/2, detection_threshold()*2)
       y2 <- ABC[4]*1.1
@@ -208,7 +211,7 @@ server <- function(input, output) {
         scale_x,
         scale_y,
         geom_hline(yintercept = detection_threshold(), linetype = "dashed", colour = "red3"),
-        geom_vline(xintercept = values$blank_value, linetype = "dashed", colour = "red3"),
+        geom_vline(xintercept = table_values$blank_value, linetype = "dashed", colour = "red3"),
         geom_abline(intercept = lin_mod()$coefficients[1], slope = lin_mod()$coefficients[2])
       )
     })
@@ -216,9 +219,9 @@ server <- function(input, output) {
 
     output$regression_plot <- renderPlot({
       
-      req(data_filt_for_model(), detection_threshold())
+      req(table_values$main_table, detection_threshold())
       
-      data_filt_for_model() |>
+      table_values$main_table |>
         ggplot(aes(x = value, y = ABC)) +
         geom_point() +
         geom_smooth(method = "lm", fullrange = TRUE) +
@@ -226,23 +229,29 @@ server <- function(input, output) {
         coord_cartesian(xlim = c(xy_limits()[1], xy_limits()[2]), ylim = c(xy_limits()[3], xy_limits()[4])) +
         geom_line_opts() +
         theme_bw() +
-        annotate(geom = "text", x = data_filt_for_model()$value[1], 
+        annotate(geom = "text", x = table_values$main_table$value[1], 
                  y = detection_threshold() *1.2, 
                  label = round(detection_threshold(), digits = 1),
                  col = "red3") +
-        annotate(geom = "text", x = values$blank_value * 1.5, 
+        annotate(geom = "text", x = table_values$blank_value * 1.5, 
                  y = ABC[1], 
-                 label = values$blank_value,
+                 label = table_values$blank_value,
                  col = "red3")
       
     })
     
     # Table outputs --------------
     
-    tabled_data <- reactive({
-      selected_data() |>
-      select(bead_no, value) |>
-        mutate(ABC = c(ABC, NA))
+    tabled_data <- reactiveVal()
+    
+    
+    observe ({
+      req(table_values$main_table)
+      tbl <- table_values$main_table |>
+        select(bead_no, value) |>
+        add_row(tibble_row(bead_no=NA, value=table_values$blank_value))
+        #mutate(ABC = c(ABC, NA))
+      tabled_data(tbl)
     })
     
     output$data_table <- renderDT(
@@ -255,8 +264,24 @@ server <- function(input, output) {
     observeEvent(input$data_table_cell_edit, {
       info <- input$data_table_cell_edit
       
+      if(info$row == 5) {
+        if (info$col ==1) {
+          table_values$blank_value <- info$value
+        }
+      } else {
       
-      print("here")
+        # this is a bit messy
+        col_no <- if_else(info$col == 0, 3, 5)
+        
+        #new_tbl <- tabled_data()
+        #new_tbl[info$row, info$col+1] <- info$value
+        new_tbl <- table_values$main_table
+        new_tbl[info$row, col_no] <- info$value
+        
+        table_values$main_table <- new_tbl
+      }
+      
+      print(info)
     })
 }
 

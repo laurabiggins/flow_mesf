@@ -15,7 +15,6 @@ ABC <- c(1732, 6184, 26770, 120137)
 
 
 # TODO:
-# working with negative values
 # adding in own data
 
 # extract the linear model code into a module so it can 
@@ -253,6 +252,12 @@ server <- function(input, output) {
       editable = TRUE
     )
     
+    observeEvent(input$data_table_cell_edit, {
+      info <- input$data_table_cell_edit
+      
+      
+      print("here")
+    })
 }
 
 # Run the application 

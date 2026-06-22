@@ -3,6 +3,7 @@ library(bslib)
 library(tidyverse)
 library(DT)
 library(scales)
+library(shinyjs)
 
 data <- read_rds(file = "data/mesf_tidied.rds")
 ABC <- c(1732, 6184, 26770, 120137)
@@ -63,7 +64,14 @@ ui <- page_sidebar(
       card_header(textOutput("dataset_info")),
       layout_columns(col_widths = c(7,5),
         plotOutput("regression_plot"),
-        DTOutput("data_table")
+        verticalLayout(
+          DTOutput("data_table"),
+          conditionalPanel(
+            condition = "input.data_table_rows_selected.length > 0",
+            actionButton("delete", "Delete selected row")
+          )#,
+          #actionButton("delete", "Delete selected row")
+        )
       )
     )
 )
@@ -72,10 +80,13 @@ server <- function(input, output) {
   
   observeEvent(input$browser, browser())
 
-  # tibble of 4 rows - beads 1:4
-  # unstained value
+  # 2 items 
+  # $main_table - tibble of 4 rows - beads 1:4
+  # $unstained value
   table_values <- reactiveValues()
   
+  # $max_channel_value
+  # $reg_coef
   values <- reactiveValues()
   
   # update main table values when go button is pressed
@@ -85,14 +96,22 @@ server <- function(input, output) {
       filter(raw_unmixed == input$type) |>
       filter(fluoro == input$fluoro)
     
-    validate(need(nrow(filtered_data) > 0, "Data unavailable"))
+    validate(need(nrow(filtered_data) == 5, "Data unavailable"))
     
-    table_values$main_table <- filter(filtered_data, bead_no != "Unstained")
     table_values$blank_value <- filter(filtered_data, bead_no == "Unstained")$value
+    
+    table_values$main_table <- filtered_data |>
+      filter(bead_no != "Unstained") |>
+      add_column(ABC)
+    
     
   }) |>
     bindEvent(input$go)
    
+  
+  sign_preserved_log10_values <- reactive({
+    sign(table_values$main_table$value) * log10(1 + abs(table_values$main_table$value))
+  })
     
   observe({
     
@@ -101,16 +120,15 @@ server <- function(input, output) {
     values$max_channel_value <- max(table_values$main_table$value)
     
     if (input$allow_neg) {
-      values$reg_coef <- cor(x = log10(ABC), y = sign_preserved_log10_values())
+      values$reg_coef <- cor(x = log10(table_values$main_table$ABC), y = sign_preserved_log10_values())
+      #values$reg_coef <- cor(x = log10(ABC), y = sign_preserved_log10_values())
     } else {
-      values$reg_coef <- cor(x = log10(ABC), y = log10(table_values$main_table$value))
+      values$reg_coef <- cor(x = log10(table_values$main_table$ABC), y = log10(table_values$main_table$value))
     }
   }) |>
     bindEvent(table_values$main_table, input$allow_neg)
     
-  sign_preserved_log10_values <- reactive({
-    sign(table_values$main_table$value) * log10(1 + abs(table_values$main_table$value))
-  })
+
   
     # Linear model -----
     # returns log10 values
@@ -118,12 +136,12 @@ server <- function(input, output) {
       req(table_values$main_table)
       
       if (input$allow_neg) {
-        log_abc <-  sign(ABC) * log10(1 + abs(ABC))
+        log_abc <-  sign(table_values$main_table$ABC) * log10(1 + abs(table_values$main_table$ABC))
         #log_chan <- sign(table_values$main_table$value) * log10(1 + abs(table_values$main_table$value))
         log_chan <- sign_preserved_log10_values()
         lm(log_abc ~ log_chan)
       } else {
-        log_abc <- log10(ABC)
+        log_abc <- log10(table_values$main_table$ABC)
         log_chan <- log10(table_values$main_table$value)
         lm(log_abc ~ log_chan)
       }
@@ -162,19 +180,22 @@ server <- function(input, output) {
       10^vals[2:3]
     })
     
+    # axis limits - this is so we can extend the axes slightly further than default
+    
     xy_limits <- reactive({
       req(detection_threshold())
       x1 <- if_else(sign(table_values$blank_value) == 1, table_values$blank_value/2, table_values$blank_value*2)
       x2 <- values$max_channel_value * 1.1
       y1 <- if_else(sign(detection_threshold()) == 1, detection_threshold()/2, detection_threshold()*2)
-      y2 <- ABC[4]*1.1
+      y2 <- table_values$main_table$ABC[4]*1.1
       c(x1, x2, y1, y2)
     })
     
-    # Outputs ----
+    # Text outputs ----
     
     output$detection_threshold <- renderText({
-      validate(need(isTruthy(detection_threshold()), "Data contains negative values, toggle switch to allow these."))
+      validate(need(isTruthy(detection_threshold()), "No valid detection threshold."))
+      #validate(need(isTruthy(detection_threshold()), "Data contains negative values, toggle switch to allow these."))
       round(detection_threshold(), digits = 1)
     })
     
@@ -197,6 +218,10 @@ server <- function(input, output) {
     }) |>
       bindEvent(input$go)
     
+    # Plot outputs ----
+    
+    ## plot options ----
+    
     geom_line_opts <- reactive({
       
       if(input$allow_neg) {
@@ -216,6 +241,7 @@ server <- function(input, output) {
       )
     })
     
+    ## plot output ----
 
     output$regression_plot <- renderPlot({
       
@@ -244,13 +270,13 @@ server <- function(input, output) {
     
     tabled_data <- reactiveVal()
     
+    ## select the required columns from the main table and add in the unstained/blank value
     
     observe ({
       req(table_values$main_table)
       tbl <- table_values$main_table |>
         select(bead_no, value) |>
         add_row(tibble_row(bead_no=NA, value=table_values$blank_value))
-        #mutate(ABC = c(ABC, NA))
       tabled_data(tbl)
     })
     
@@ -258,31 +284,51 @@ server <- function(input, output) {
       tabled_data(),
       options = list(dom = 't'),
       rownames = FALSE,
-      editable = TRUE
+      editable = list(
+        target = "cell",
+        disable = list(columns = c(0))  # disable first column - we only want to edit the values
+      )
+      #editable = TRUE
     )
     
+    
+    ## Edit table values
     observeEvent(input$data_table_cell_edit, {
       info <- input$data_table_cell_edit
       
       if(info$row == 5) {
-        if (info$col ==1) {
           table_values$blank_value <- info$value
-        }
       } else {
-      
-        # this is a bit messy
-        col_no <- if_else(info$col == 0, 3, 5)
-        
-        #new_tbl <- tabled_data()
-        #new_tbl[info$row, info$col+1] <- info$value
+
         new_tbl <- table_values$main_table
-        new_tbl[info$row, col_no] <- info$value
+        new_tbl[info$row, "value"] <- info$value
         
         table_values$main_table <- new_tbl
       }
       
       print(info)
     })
+    
+    ## The delete row button ----
+    
+    # disable("delete")
+    # 
+    # observe({
+    #   if (length(input$tbl_rows_selected) > 0)
+    #     enable("delete")
+    #   else
+    #     disable("delete")
+    # })
+    
+    ## delete a row from the table ----
+    observeEvent(input$delete, {
+      req(input$data_table_rows_selected)
+      new_tbl <- table_values$main_table
+      new_tbl <- new_tbl[-input$data_table_rows_selected, ]
+      
+      table_values$main_table <- new_tbl
+    })
+    
 }
 
 # Run the application 
